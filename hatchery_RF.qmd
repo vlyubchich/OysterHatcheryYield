@@ -1,0 +1,953 @@
+---
+title: Machine learning of factors for improving oyster hatchery production 
+author: 
+  - Vyacheslav Lyubchich
+  - Matthew W. Gray
+  - Greg M. Silsbe
+citation:
+  type: report
+  publisher: "University of Maryland Center for Environmental Science"
+  publisher-place: "Cambridge, Maryland, USA"
+  url: https://vlyubchich.github.io/hatchery_rf
+date: today
+date-format: iso
+fig-cap-location: top
+# fontsize: 12pt
+# geometry: margin = 1in
+execute:
+  echo: false
+  
+bibliography: 
+  - refpackages.bib
+  - "G:/My Drive/ResearchProjects/refsGeneral.bib"
+csl: "G:/My Drive/ResearchProjects/springer-basicVL.csl"
+
+format:
+  html:
+    code-fold: true
+    code-link: false
+    theme: cosmo
+    fig-width: 12
+    fig-height: 7
+    page-layout: full
+    toc: true
+    toc-location: left
+    number-sections: true
+    self-contained: true
+        
+knitr:
+  opts_chunk:
+    collapse: false
+    message: false
+    warning: false
+    comment: "#>"
+    R.options:
+      knitr.graphics.auto_pdf: true
+            
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+rm(list = ls())
+# library(knitr)
+# 
+library(dplyr)
+library(readr)
+# library(purrr)
+library(ggplot2)
+theme_set(theme_light())
+# library(viridis)
+library(patchwork)
+# library(plotly)
+library(leaflet)
+# 
+library(rstatix)
+library(ggpubr)
+# 
+library(ranger)
+library(Boruta)
+library(fastshap)
+library(shapviz)
+# # devtools::install_github("vlyubchich/MML")
+# # library(MML)
+
+COL = c(black = "black"
+        ,red = rgb(100, 38, 33, maxColorValue = 100)
+        ,green = rgb(38, 77, 19, maxColorValue = 100)
+        ,blue = rgb(28, 24, 61, maxColorValue = 100)
+        ,purple = rgb(76, 32, 72, maxColorValue = 100)
+        ,cyan = rgb(21, 75, 87, maxColorValue = 100)
+        ,dark_cyan = rgb(0, 47, 59, maxColorValue = 100)
+        ,yellow = rgb(99, 90, 13, maxColorValue = 100)
+)
+# par(mar = c(0, 0, 0, 0), mgp = c(0, 0, 0))
+# barplot(rep(1, length(COL)), col = COL, border = NA, axes = FALSE, space = c(0, 0))
+COORDINATES <- data.frame(lat = c(38.59, 38.5563, 38.574, 38.5393),
+                          lon = c(-76.13, -76.4147, -76.069, -76.0304),
+                          name = c("Horn Point Laboratory Oyster Hatchery",
+                                   "Goose's Reef buoy",
+                                   "Station CAMM2 - 8571892 - Cambridge, MD",
+                                   "Cambridge airport"),
+                          type = c("Hatchery", rep("Station", 3)))
+# GR average of non-missing coords from "GR_MET_2008-2021.csv", matches 
+# https://buoybay.noaa.gov/locations/gooses-reef
+RESPONSE <- "Yield"
+# Prediction wrapper
+pfun <- function(object, newdata) {  
+    unname(predict(object, data = newdata)$predictions)
+}
+```
+
+Our research focuses on investigating the variability in oyster hatchery production yields and identifying factors that influence these outcomes. 
+By understanding the predictors of hatchery production outcomes, we aim to enhance the efficiency of oyster hatchery operations.
+
+Improving the efficiency of hatchery production is crucial as it not only impacts profitability but also addresses concerns among growers regarding the availability of oyster seeds. 
+To achieve this, we gathered production data from the Horn Point Laboratory Oyster Hatchery and collected relevant information on weather and water conditions near the hatchery.
+
+Leveraging the power of machine learning, we employed predictive modeling techniques to identify key indicators of low and high aquaculture yields.
+Yield was defined as the percent of pediveliger larvae produced from the fertilized eggs initially stocked at the beginning of the production process. 
+The models we developed can generate forecasts for specific conditions and provide valuable insights to hatcheries on implementing appropriate practices to enhance cost-effectiveness.
+
+We are pleased to make our findings publicly available, encouraging comments and feedback from the research and oyster growers community. 
+Should you have any thoughts or suggestions, please don't hesitate to share them as a comment below or contact the authors. 
+
+```{r}
+# https://quarto.org/docs/interactive/widgets/htmlwidgets.html
+pal <- colorFactor(c("red", "navy"), domain = c("Hatchery", "Station"))
+leaflet(COORDINATES) %>%
+  addTiles() %>%
+  setView(lng = COORDINATES$lon[1], lat = COORDINATES$lat[1], zoom = 9) %>%
+  addCircleMarkers(~lon, ~lat, popup = ~name, 
+                   radius = 6,
+                   stroke = FALSE, fillOpacity = 0.5,
+                   color = ~pal(type))
+```
+
+
+# Background
+
+The success of oyster aquaculture, fisheries augmentation, and restoration in the Chesapeake Bay heavily relies on the hatchery production of larvae. 
+Despite the expertise of skilled hatchery staff, shellfish hatcheries frequently encounter periods of suboptimal larval growth and inconsistent production levels. 
+The Horn Point Laboratory Oyster Hatchery (HPLOH) is no exception, with highly variable yield rates, ranging from 5% to 17% on average, and occasional broods exceeding 50% yield [@Gray:etal:2022:hatchery].
+
+In addition to reduced production levels, HPLOH and other hatcheries commonly face acute mortality events known as crashes. 
+Crashes have been an ongoing issue within the global shellfish aquaculture industry [@Walker:2017seed] and affect various cultivated shellfish species [@Jones:2006why]. 
+These crashes can occur suddenly, leading to the loss of entire batches of larvae overnight. 
+Observations have revealed larvae covered in bacterial coatings or filled with ciliates, making it challenging to determine whether these factors caused the crash or opportunistic invaders took advantage of a compromised batch [@Estes:etal:2004pathogenicity].
+Besides bacterial contamination, acute fluctuations in water quality, such as harmful algal blooms or abrupt changes in salinity or oxygen levels, can also disrupt culture conditions and critical components of the production process, including broodstock conditioning or algae cultures [@Jones:2006why].
+
+To ensure suitable production conditions, hatcheries regularly monitor the quality of their source water. 
+When conditions are suboptimal, facilities can make adjustments, such as adding salt, to mitigate adverse environmental effects and resume production. 
+However, in many cases, the causes of crashes or production inefficiencies remain unidentified. 
+Hatchery staff often lack the time and resources to investigate the root causes thoroughly. 
+As a result, the most common approach to managing crashes is to flush out "bad" water, clean tanks, and hope that refilling them with "good" water will enable production to resume. 
+Unfortunately, adverse conditions can persist for extended periods [@Barton:etal:2012;@Gray:etal:2022:hatchery], severely limiting oyster production regionally and incurring significant financial losses for the industry [e.g., over $110 million during the "Seed Crisis" in the Pacific Northwest, @Ekstrom:etal:2015vulnerability]. 
+Therefore, there is a critical need to identify predictors for hatchery yield, particularly regarding low yield, to prevent costly crashes. 
+Tools that enhance production reliability would increase the profitability of public and private hatcheries by improving resource utilization and minimizing waste. 
+Moreover, ensuring a more reliable seed supply would alleviate concerns among growers in Maryland and beyond, creating greater opportunities for industry expansion.
+
+
+# Data
+
+## Oyster production data
+
+We supplemented the long-term hatchery production data used by @Gray:etal:2022:hatchery with more recent data from the HPLOH.
+The combined dataset spanned the years 2011 to 2021 and provided detailed information on broodstock, spawning, and larval production in the hatchery.
+
+The primary focus of our study was the hatchery yield, which was defined as the percentage of pediveliger oyster larvae (i.e. eyed larvae) out of all the fertilized eggs added into a tank:
+$$
+\text{Yield} = \frac{\text{Eyed larvae produced}}{\text{Eggs added to tank}} \times 100\%.
+$$
+To gain a clearer understanding of the factors influencing production outcomes, we specifically examined broods that were not mixed during the production process.
+Consequently, we did not include information on mixed broods in our analysis.
+
+During the data cleaning process, several measures were taken:
+
+- All yields were set to zero when the HPLOH indicated that the brood was "dumped" due to a production crash.
+- Records with HPLOH notes indicating "no eggs" (7 records) or those lacking information on the number of eyed larvae (9 records) were removed.
+- Records displaying an unusually low production rate (number of days to first eyed oysters) were removed. 
+We identified three such records with production rates below 9 days, which typically indicate rushed production for a specific buyer of larvae.
+    
+From the HPLOH records from different stages of the production process, we considered various predictors of yields:
+
+(@) Broodstock collection:
+  - Name of the oyster bar of collected broodstock.
+(@) Conditioning:
+  - Average conditioning pH (NBS units),
+  - Average conditioning salinity (ppt), and
+  - Average conditioning temperature (°C).
+(@) Spawning:
+  - Average shell height of females (mm),
+  - Average shell height of males (mm),
+  - Fecundity (millions of eggs per female),
+  - Gonadal index (1 to 4), and
+  - Stimulation used (female / male / other / none).
+(@) Larval culture:
+  - Week of year when production started (1 to 52) and
+  - Carbonate tank buffering (yes or no).
+
+We narrowed down the list of predictors compared to @Gray:etal:2022:hatchery to focus on identifying explanatory relationships that could be used to predict yields before the production process commenced. 
+For instance, we did not include the year of broodstock collection as a predictor due to its limited explanatory value. 
+Also, the percentage survival to prodissochonch II stage (a.k.a. D-hinge) was not used since this information becomes available only later in the production process.
+
+To determine the date when each new brood's tank was filled with ambient water, we used the date of the first drain and the corresponding oyster age as reported by the HPLOH:
+$$
+\text{Date:time of first fill} = \text{Date:time of first drain} - \text{Age at the first drain (hours)}.
+$$
+This calculated date served as a reference point to extract information on environmental conditions near the hatchery.
+
+
+## Environmental data
+
+We used different information sources to obtain information on several environmental variables recorded on the day of tank filling. 
+To account for potential delayed effects on oyster hatchery production outcomes, these variables were utilized both in their original form and with a lag of 1 to 7 days, excluding the variables representing winter conditions.
+
+
+**Goose's Reef buoy**
+
+We used quality-controlled records from the [Goose's Reef buoy](https://buoybay.noaa.gov/locations/gooses-reef), which is part of the NOAA's Chesapeake Bay Interpretive Buoy System (CBIBS).
+The water quality variables included:
+
+- Chlorophyll concentration (ug/L),
+- Dissolved oxygen concentration (mg/L),
+- Salinity (PSU),
+- Turbidity (NTU), and
+- Water temperature (°C)
+
+In addition to water quality, the buoy also recorded atmospheric conditions, including:
+
+- Air temperature (°C),
+- Wind direction (degrees clockwise from true north), and
+- Wind speed (m/s).
+
+Examinign water quality effects on hatchery production is an intuitive avenue of investigation, but in an effort to build predictive tools that may eventually lead to an early warning system for the hatchery, it was important for us to examine weather data and its effects on Choptank water quality and hatchery production.
+
+During the data cleaning process, the following steps were taken to ensure data quality and completeness:
+
+- Retained only data with the highest quality codes (1 and 2).
+- Removed records of chlorophyll, dissolved oxygen, salinity, and turbidity outside the range of 0--50.
+- Aggregated the 10-minute data to obtain daily averages.
+- Used simple linear regressions between the buoy data and corresponding data measured at the [NOAA's station CAMM2](https://www.ndbc.noaa.gov/station_history.php?station=camm2)  in Cambridge, MD, to fill in missing information on daily air and water temperatures where possible (adjusted coefficient of determination $R^2_{adj.} > 0.95$ in both cases).
+- Used a simple linear regression between the buoy air temperature and air temperature measured at the [Cambridge airport](https://mesonet.agron.iastate.edu/request/download.phtml?network=MD_ASOS) to fill in missing daily air temperatures where possible.
+(Linear regressions of Goose's Reef wind speed and direction with corresponding observations measured at the station CAMM2 and the airport produced $R^2_{adj.} < 0.7$ and consequently were not used to fill in the missing data.)
+- Filled in the remaining missing data for the Goose's Reef using the iterative random forests algorithm implemented in the R package `missForest` [@R-missForest].
+This algorithm implemented up to 100 random forests, each with 50 regression trees, and incorporated all available variables measured at the buoy, station CAMM2 (air and water temperatures, wind speed and direction), and the Cambridge airport (air temperature, wind speed and direction), along with the numeric year, month, and day of the year for time-series predictions.
+
+By following these steps, we completed the dataset of environmental conditions directly measured near the HPLOH, incorporating both water quality and atmospheric information from the Goose's Reef buoy.
+
+
+**Daymet gridded weather conditions**
+
+We used the R package `daymetr` [@R-daymetr] to access the [Daymet Version 4](https://daymet.ornl.gov/) dataset. 
+Daymet offers gridded estimates of daily weather based on statistical modeling techniques that interpolate and extrapolate ground-based observations. 
+For the 1 km $\times$ 1 km grid corresponding to the location of the HPLOH, we obtained the following daily time series of weather variables:
+
+- Precipitation (mm),
+- Maximum temperature (°C), and
+- Minimum temperature (°C).
+
+Additionally, we calculated the daily average temperature (°C) by taking the average of the minimum and maximum temperatures.
+
+
+**Remote sensing products** 
+
+We used Google Earth Engine pipelines to collect daily time series of the following variables:
+
+- Normalized difference vegetation index (NDVI). 
+We obtained NDVI measurements from both the Landsat-8 Operational Land Imager (OLI) and the Sentinel-2 MultiSpectral Instrument (MSI). 
+The NDVI serves as an indicator of vegetation health and was used to estimate the potential impact of agricultural practices and other land uses on water quality.
+These measurements were aggregated across the larger Choptank River watershed and nearby subwatersheds. 
+Specifically, we examined the changes (differences) in NDVI over various time intervals: 1, 2, 4, 8, 16, and 32 days. 
+This resulted in seven NDVI variables that helped us understand the effects of agricultural practices, such as fertilizer and herbicide application.
+- Chlorophyll.
+We also considered chlorophyll measurements within a 1-km radius of the HPLOH (inlet) and in the Choptank River subwatershed used for calculating the NDVI. 
+These two remotely sensed chlorophyll variables provided insights into the levels of chlorophyll-a, which is an indicator of phytoplankton abundance and water quality.
+
+
+**Winter averages**
+
+To consider the influence of winter conditions preceding the hatchery production seasons, we averaged the following daily variables for January--February of each year:
+
+- Air temperature (Goose's Reef),
+- Chlorophyll concentration (Goose's Reef),
+- Oxygen concentration (Goose's Reef),
+- Salinity (Goose's Reef),
+- Water temperature (Goose's Reef),
+- Precipitation (Daymet), and
+- NDVI (remote sensing).
+
+```{r}
+# Load data
+tmp <- base::sort(list.files(pattern = "datalists_",
+                             path = "./data",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+# print(tmp[1])
+load(tmp[1])
+tmp <- base::sort(list.files(pattern = "datacompile_",
+                             path = "./data",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+# print(tmp[1])
+DATA <- readRDS(tmp[1])
+DATA_long <- reshape2::melt(DATA %>% select(all_of(c(RESPONSE, 
+                                                     predictors0_numeric, 
+                                                     predictors_winter))), 
+                            "Yield")
+```
+
+
+Overall, we considered `r length(predictors)` predictors, including the original `r length(predictors0)` predictors and their lagged versions.
+@tbl-summ shows the statistical summaries, and @fig-pairs shows pairwise plots of the original (not lagged) variables. 
+
+```{r}
+#| label: tbl-summ
+#| tbl-cap: "Summary of the response variable (yield) and original numeric predictors."
+
+DATA %>% 
+  dplyr::select(all_of(c(RESPONSE, c(predictors0_numeric, predictors_winter)))) %>% 
+  psych::describe(fast = TRUE, omit = TRUE) %>% 
+  # dplyr::select(-vars) %>% 
+  dplyr::rename(unit = vars) %>% 
+  dplyr::mutate(unit = c("%",
+                         "mm", "mm", "millons of eggs/female", "1 to 4", 
+                         "NBS units", "ppt", "°C", "1 to 52", "°C", "ug/l", "mg/l",
+                         "ppt", "NTU", "°C", "degree 1° to 360°", "m/s", "mm/day", 
+                         "°C", "°C", "°C", "ug/l", "ug/l", 
+                         rep("-1 to 1", 8), 
+                         "mm/day", "°C", "ppt", "mg/l", "ug/l", "°C")) %>% 
+  knitr::kable(digits = 3, longtable = TRUE)
+```
+
+
+```{r}
+#| label: fig-pairs
+#| fig-cap: "Pairwise scatterplots of each of the variables (horizontal axis) with yield (vertical axis)."
+#| fig-height: 25
+
+# par(mfrow = c(ceiling(length(predictors0)/4), 4),
+#     mar = c(4, 4, 1, 1) + 0.1)
+# 
+# for (p in predictors0) {
+#   tmp <- na.omit(DATA[,c(RESPONSE, p)])
+#   if (is.character(tmp[,p])) {
+#     tmp[,p] <- as.factor(tmp[,p])
+#   }
+#   plot(x = tmp[,p], y = tmp[,RESPONSE]
+#        ,las = 1
+#        ,xlab = p
+#        ,ylab = RESPONSE)
+# }
+
+ggplot(DATA_long, aes(x = value, y = Yield)) +
+  geom_point() +
+  facet_wrap(vars(variable), ncol = 4, scales = "free_x") + 
+  xlab("")
+```
+
+Additionally, @fig-OHenv shows how some of the environmental variables relate to those measured at the hatchery.
+We observe correlations between the temperatures (ambient water and air temperatures are correlated with water temperature at the hatchery -- @fig-OHenv A--C) and water salinities (@fig-OHenv D), but no visible relationship is observed between precipitation and hatchery salinity (@fig-OHenv E).
+
+```{r}
+#| label: fig-OHenv
+#| fig-cap: "Correspondence of some of the environmental variables from the Goose's Reef (GR) and Daymet (DM) datasets with conditions at the hatchery."
+
+p10 <- DATA %>%
+    ggplot(aes(x = GR_WaterTemp, y = Spawn_Temp)) + 
+    geom_point()
+p11 <- DATA %>%
+    ggplot(aes(x = GR_AirTemp, y = Spawn_Temp)) + 
+    geom_point()
+p12 <- DATA %>%
+    ggplot(aes(x = DM_TempAvg, y = Spawn_Temp)) + 
+    geom_point()
+p21 <- DATA %>%
+    ggplot(aes(x = GR_Salinity, y = Spawn_Salinity)) + 
+    geom_point()
+p22 <- DATA %>%
+    ggplot(aes(x = DM_Precip, y = Spawn_Salinity)) + 
+    scale_x_continuous(trans = 'log10') +
+    geom_point()
+(p10 + p11 + p12) / (p21 + p22) +
+    plot_annotation(tag_levels = 'A')
+```
+
+
+# Machine learning methods
+
+In our study, we employed data-driven machine learning methods to investigate the impact of various variables on hatchery production yield and to identify key predictors.
+The main method, which produced a predictive model, was the random forest.
+To select relevant variables and appropriate structure of the random forest model, we tried several variable selection techniques and combinations of random forest parameters.
+The technique for picking important variables and the model parameters were selected by assessing the resulting model accuracy on data that were deliberately left out (i.e., we cross-validated the selections we made).
+Finally, we used Shapley values to interpret the effects of individual variables represented in the model and decompose individual predictions of hatchery yields.
+The subsections below describe each of the methods in more detail and name the software packages we used.
+Overall, we used R 4.2.2 [@R-base] for the computations, and our full code can be accessed on [GitHub](https://github.com/vlyubchich).
+
+
+## Random forest {#sec-MRF}
+
+Random forest [@Breiman:2001] is a versatile approach that builds predictive models for hatchery yields, given a training dataset with observed yields (response variable) and potentially related variables (predictors).
+The random forest algorithm picks a predictor and its value that splits the response values into the most distinct of homogeneous subsets (to minimize variance around the group means).
+Consecutive splits can be done using a different predictor or just using a different threshold of the same predictor. 
+The resulting sequences of splits have a shape of a tree, where the root is the whole input dataset and leaves are the ultimate subsets of the data that do not get split anymore (the minimal size of these subsets is usually called the *nodesize*).
+Average response values in the leaves are used as the tree predictions.
+For example, to obtain yield predictions from a tree, given a certain combination of predictors, the algorithm finds a leaf that corresponds to this combination and uses the average yield in that leaf as the prediction.
+
+To grow multiple trees from the same input dataset and to make the trees more different from one another, each tree is grown on a bootstrap sample (sample with replacement from the original data), and only a random subset of size *mtry* of all the predictors is considered when selecting each new split in a tree.
+Predictions from all trees in the random forest are averaged to obtain a single prediction for a given combination of input variables.
+While using simple randomization and multiple simple splits, random forest is capable of modeling complex relationships between variables and providing accurate predictions.
+
+An advantage of the random forest algorithm is the low number of parameters that need to be tuned to improve the model structure and predictive performance.
+Most often, *mtry* and *nodesize* are tuned, while default values can be used for other parameters of the algorithm, for example,
+
+- the size of the bootstrap samples (we used the default, equal to the sample size), 
+- case weights (we weighted all observations equally), and 
+- number of trees (we used the default of 500 since by reaching this number of trees the model errors plateaued and did not decrease further).
+
+The *nodesize* controls the depth of the trees: smaller *nodesize* results in deeper and possibly overfitted trees (overfitted models provide a close fit to the data but often have poor performance on a new testing dataset), while larger *nodesize* results in shallower trees with better out-of-sample performance.
+However, random forest aggregates predictions from many overfitted trees, hence the effect of *nodesize* is often modest, and full trees can be grown. 
+By default, *nodesize = 5* when modeling a numeric response variable.
+
+Low *mtry* corresponds to more different (decorrelated) trees, which results in lower variance but a higher bias of the random forest.
+In turn, high *mtry* increases the chance of the most relevant variable to be picked when growing the trees, which reduces the bias but increases the variance of the ensemble [@Hastie:etal:2009].
+The default value of *mtry* is (rounded down) $p/3$ or $\sqrt{p}$ in different software packages, where $p$ is the total number of predictors.
+
+The *mtry*, *nodesize*, and other parameters mentioned here are sometimes called the 'tuning parameters' or 'hyperparameters' because they are set by the user and are not estimated from the input data directly (for example, compared to coefficients in statistical regression models).
+In this study, we used the cross-validation technique described below to consider several combinations of these parameters and make a data-informed decision.
+Specifically, we considered *mtry* of 5, 7, 10, 15, 20, 25, 30, 40, and 50; and *nodesize* of 1, 3, 5, and 10.
+We used the R package *ranger* [@R-ranger] to train these random forest models.
+
+
+## Identification of important predictors (a.k.a. variable selection) {#sec-MVarSel}
+
+We apply variable selection techniques to improve performance of the random forest model and, as a result, identify important predictors of hatchery yield.
+If among the $p$ original predictors there are many irrelevant ones, it leads to a smaller chance for at least one relevant predictor to be picked in the random subset of *mtry* predictors when creating a new tree split [@Hastie:etal:2009].
+Reducing the number of irrelevant predictors ensures that most subsets of size *mtry* will contain at least one relevant predictor for growing the tree.
+However, it is not required to get rid of absolutely all irrelevant predictors since they might not be picked for making a split at all, as long as there is a better alternative in the *mtry* set [@Hastie:etal:2009].
+
+The fact that the final random forest model might not employ all of the input variables and the modeled relationships are not expressed in a single coefficient (like it is possible in statistical linear regression models) is due to the black-box nature of the method.
+We address it using the model interpretation techniques discussed below.
+
+The importance of a predictor in a random forest is usually quantified by the average increase of prediction errors given the values of this predictor were permuted.
+If the predictor is important, then random permutations of its values will worsen the prediction accuracy more than if the predictor was not important.
+However, there is no inherent threshold to separate the importance values into statistically significant or not, hence additional methods have been developed.
+
+From a variety of methods for variable selection, we applied two best-performing algorithms developed specifically for random forest models: Boruta [@Kursa:Rudnicki:2010] and interaction forest [@Hornung:Boulesteix:2022].
+We also applied each of these algorithms recursively (until no irrelevant predictors were identified) and compared to the baseline when all predictors were used, without selection.
+This gave us *five options* for variable selection that we compared in a cross-validation study. 
+
+To decide on the significance of random forest predictors, the Boruta algorithm creates permuted copies of the original predictors.
+Then, the algorithm calculates the importances of these 'shadow' predictors and groups them into maximal, mean, and minimal based on the obtained values.
+Since the shadow predictors are inherently irrelevant, as they are just random permutation, their importances represent the importance distribution of irrelevant predictors.
+The algorithm compares the maximal shadow importances with importances of real predictors, using the pairwise t-test adjusted for the number of comparisons. 
+In our single implementation of Boruta, we kept only those predictors that had significantly higher performances than the maximal shadow ones (i.e., removed predictors with importances below or not significantly different from the shadow ones).
+In our recursive implementation of Boruta, we removed only rejected predictors (i.e., those with importances significantly lower than the shadow ones) and repeated the selection until no more predictors could be rejected.
+We used the R package *Boruta* [@R-Boruta] with its default settings for applying this algorithm.
+
+The algorithm of interaction forest presents a new effect importance measure (EIM) that allows us to rank the importances of individual predictors (similar to the more traditional approaches described above) and to consider bivariate splits (interaction effects) and their importance.
+In our simple implementation of interaction forest, all original predictors were used, without variable selection, hence only the selection of splits differed from the conventional random forest. 
+In our recursive implementation of the interaction forest, we removed predictors with univariate EIM < 0 and retrained the interaction forest.
+We also considered the option of keeping predictors that resulted in bivariate EIM > 0 (positive importance of interaction effects), but it did not result in reducing the number of predictors from the original number.
+We used the R package *diversityForest* [@R-diversityForest] to train the interaction forests.
+
+
+## Cross-validation for performance evaluation
+
+To compare different options of random forest algorithms and variable selection and select one for the final model, we used cross-validation on the available data.
+In cross-validation, only a portion of the data is used for training the model (a.k.a. training set) while a hold-out portion (a.k.a. validation set) is treated as new data that can be used to assess real-life predictive performance of the model.
+
+Specifically, we used $k$-fold cross-validation, where the input cases are randomized and separated into $k$ equal folds (subsets).
+We can use the folds $2, \ldots, k$ to train the model, and predictors from fold 1 to make yield forecasts for fold 1 (the validation fold).
+The procedure is repeated until all $k$ folds are used as validation folds.
+We used $k = 10$ and the R package *caret* [@R-caret] to separate the data into folds so the same randomization is used to compare competing options.
+
+The forecasts on the validation folds are considered out-of-sample forecasts since the corresponding data were not used for model specification and training.
+Let $e_i$ denote the cross-validation error, which is the difference between true yield ($y_i$) and the forecast ($\hat{y}_i$):
+$$
+e_i = y_i - \hat{y}_i,
+$$
+where $i = 1, 2, \ldots, n$ and $n$ is the sample size.
+We evaluated the performance of alternative models using three metrics: mean absolute error (MAE), root mean square error (RMSE), and coefficient of determination ($R^2$), which were calculated as follows:
+$$
+MAE = n^{-1} \sum |e_i|,
+$$
+
+$$
+RMSE = (n^{-1} \sum e_i^2)^{1/2},
+$$
+
+$$
+R^2 = 1 - \frac{\sum e_i^2}{\sum (y_i - \bar{y})^2},
+$$
+where $\bar{y} = n^{-1} \sum y_i$ is the average observed yield.
+Smaller errors (MAE and RMSE) are preferred, but RMSE penalizes large individual errors $e_i$ more than MAE.
+Higher $R^2$ is preferred as it shows the percentage of yield variability captured with the forecasts.
+The performance metrics MAE, RMSE, and $R^2$ generally provided consistent results, but $R^2$ was used for making final selections.
+
+To identify statistically significant differences between different algorithms, we also used paired $t$-tests to compare average performance metrics from $k$ cross-validation folds.
+The $p$-values from these tests were adjusted for the number of pairwise comparisons using the Benjamini--Hochberg procedure to control the false discovery rate [@Benjamini:Hochberg:1995].
+The tests with the adjustment for multiple testing were implemented using the R packages *stats* [@R-base] and *rstatix* [@R-rstatix], and visualized with boxplots using the R package *ggpubr* [@R-ggpubr].
+
+In this study, we first ran a cross-validation to compare the algorithms of variable and split selection, from five alternatives (see @sec-MVarSel).
+For this first round of cross-validation, we used a set of records for which all the predictors were available (see @tbl-summ for the number of available values for each variable).
+Given the selected variables, we were able to redefine the dataset if some of the predictors with missing values were removed.
+Hence, for tuning the *nodesize* and *mtry* (see @sec-MRF) in the second round of cross-validation, we used a dataset with complete observations that was not less than the original one.
+
+
+## Model interpretation
+
+Model interpretation techniques enhance our understanding of black-box models by providing insights into the relationships learned by the model and which of the input variables affected the predictions most.
+Partial dependence plots are a typical way to demonstrate pairwise predictor-response relationships represented in a random forest [@Hastie:etal:2009], however, these plots do not provide interpretations to individual predictions.
+In this study, we use another method, based on Shapley decomposition explaining the contributions of individual predictors [@molnar2022] and adapted to compute fast (approximate) Shapley values to explain individual predictions in tree-based models like the random forest [@Lundberg:etal:2020,@Strumbelj:Kononenko:2014].
+
+The SHAP (SHapley Additive exPlanations) values $\phi_j$ by @Lundberg:etal:2020 have the additivity property such that the forecast of yield for a given vector of inputs $x$ can be decomposed as a sum [@molnar2022]:
+$$
+\hat{y}(x) = \phi_0 + \sum \phi_j,
+$$
+where $\hat{y}(x)$ is the forecast from the random forest model, $\phi_0 = \mathrm{E}(\hat{y}(X))$ is the baseline set to the average prediction across all cases, and $j$ is from 1 to the number of predictors $p$.
+
+First, we use average absolute values of SHAP, denoted as `mean(|SHAP value|)` in the figures below, to rank the importance of predictors, analogous to using the permutation-based importance in random forest. 
+The SHAP importance shows how much each variable affects the predictions in the dataset, on average.
+
+Second, we provide SHAP-based partial dependence plots. 
+Each of the plots shows SHAP values for a given predictor, hence demonstrating the general pattern of the relationships (similar to the partial dependence plots) and variability.
+
+Third, we summarize the explained effects for subsets of the cases.
+We are particularly interested in the well-predicted cases (i.e., where the model accuracy was high, with the absolute error below 3 percentage points).
+To analyze environmental and hatchery conditions responsible for the crashes or high yields, we select well-predicted crashes or well-predicted yields, correspondingly. 
+
+To compute the Shapley additive explanations, we used the R package *fastshap* [@R-fastshap] and the package *shapviz* [@R-shapviz] to visualize the results.
+
+
+# Results
+
+## Variable selection
+
+```{r}
+# Load cross-validation results
+tmp <- base::sort(list.files(pattern = "CV_All_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+M1 <- readRDS(tmp[1])
+
+tmp <- base::sort(list.files(pattern = "CV_Boruta_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+M2 <- readRDS(tmp[1])
+
+tmp <- base::sort(list.files(pattern = "CV_BorutaRec_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+M3 <- readRDS(tmp[1])
+
+tmp <- base::sort(list.files(pattern = "CV_InteractionForest_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+M4 <- readRDS(tmp[1])
+
+tmp <- base::sort(list.files(pattern = "CV_InteractionForestRec_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+M5 <- readRDS(tmp[1])
+MCV <- dplyr::bind_rows(M1, M2, M3, M4, M5)
+MCV_long <- reshape2::melt(MCV,
+                         variable.name = "Metric",
+                         id.vars = c("n", "p", "Version"))
+```
+
+From @fig-CV, variable selection using the algorithms Boruta, recursive Boruta, and recursive interaction forest led to improved performance (lower errors and higher $R^2$) compared with not using a selection algorithm (i.e., using all the variables) in a random forest.
+For the $p$-values of the tests comparing the performances of different algorithms, see @sec-CVpairs.
+The recursive implementation of Boruta consistently resulted in the most improved performance compared to using all the variables, however, the performance of recursive Boruta was not significantly different than that of Boruta or recursive interaction forest (@fig-CV). 
+Recursive Boruta generally selected fewer variables than the recursive interaction forest but more than Boruta (@fig-CVp).
+The interaction forest (non-recursive) resulted in using all variables (@fig-CVp) and hence its results were not different from using all variables altogether (@fig-CV).
+Overall, we proceed with using the recursive implementation of the Boruta algorithm for selecting relevant predictors in the model.
+
+```{r}
+#| label: fig-CV
+#| fig-cap: "Performance metrics from 10-fold cross-validation evaluating the efficiency of variable selection algorithms (Boruta, interaction forest, and their recursive options) compared to using all available predictors. A) Mean absolute error (MAE). B) Root mean square error (RMSE), and C) coefficient of determination ($R^2$) from the 10 validation subsets. The stars denote pairs with significant differences at the levels 0.05$^{*}$, 0.01$^{**}$, 0.001$^{***}$, or 0.0001$^{****}$ after adjusting the $p$-values for the number of paired tests."
+#| fig-height: 14
+
+am = "BH"
+
+pwc <- MCV %>%
+    pairwise_t_test(MAE ~ Version,
+                    paired = TRUE,
+                    p.adjust.method = am) %>% 
+    add_xy_position(x = "Version", step.increase = 1)
+p1 <- ggboxplot(MCV, x = "Version", y = "MAE", fill = "burlywood") +
+    stat_pvalue_manual(pwc, hide.ns = TRUE) +
+    xlab("")
+
+pwc <- MCV %>%
+    pairwise_t_test(RMSE ~ Version,
+                    paired = TRUE,
+                    p.adjust.method = am) %>% 
+    add_xy_position(x = "Version", step.increase = 1)
+p2 <- ggboxplot(MCV, x = "Version", y = "RMSE", fill = "burlywood") +
+    stat_pvalue_manual(pwc, hide.ns = TRUE)  +
+    xlab("")
+
+pwc <- MCV %>%
+    pairwise_t_test(R2 ~ Version,
+                    paired = TRUE,
+                    p.adjust.method = am) %>% 
+    add_xy_position(x = "Version", step.increase = 1)
+p3 <- ggboxplot(MCV, x = "Version", y = "R2", fill = "burlywood") +
+    stat_pvalue_manual(pwc, hide.ns = TRUE) + 
+    xlab("Variable selection strategy") 
+
+p1 / p2 / p3 +
+    plot_annotation(tag_levels = 'A')
+```
+
+```{r}
+#| label: fig-CVp
+#| fig-cap: "Box-plots for the number of variables selected by each algorithm in 10-fold cross-validation."
+
+# p1 <- ggplot(MCV_long, aes(y = Version, x = value, fill = Version)) +
+#     geom_boxplot() +
+#     facet_wrap(vars(Metric), ncol = 3, scales = "free_x") +
+#     xlab("") + ylab("Selection strategy") +
+#     theme(legend.position = "none") +
+#     scale_fill_brewer(palette = "Dark2")
+p2 <- ggplot(MCV_long, aes(x = Version, y = p)) +
+    geom_boxplot(fill = "burlywood") +
+    ylim(25, 150) +
+    ylab("Number of selected variables") + xlab("Variable selection strategy") +
+    theme(legend.position = "none")
+p2
+
+# p1 / p2 +
+#     plot_annotation(tag_levels = 'A')
+```
+
+```{r}
+tmp <- base::sort(list.files(pattern = "BorutaRec_B_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+B <- readRDS(tmp[1])
+tmp <- base::sort(list.files(pattern = "BorutaRec_v_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+predictors <- readRDS(tmp[1])
+DATAnoNA <- na.omit(DATA[, c(RESPONSE, predictors)])
+```
+
+The recursive Boruta algorithm, when applied to the whole dataset, selected `r length(predictors)` predictors that we are using in further analysis (@fig-boruta).
+
+```{r}
+#| label: fig-boruta
+#| fig-cap: "Variable selection with recursive Boruta (results from the last iteration of the algorithm). Green boxes correspond to predictors confirmed as important; yellow boxes correspond to predictors without a decision (treated as important), and blue boxes combine importance information (min, mean, and max) from shadow predictors obtained by permuting the original predictors."
+#| fig-height: 20
+
+#; red boxes correspond to rejected predictors
+
+par(mar = c(4, 9, 1, 1) + 0.1)
+plot(B, horizontal = TRUE, cex.axis = 0.7,
+     colCode = COL[c("green", "yellow", "red", "blue")],
+     las = 1, ylab = "", xlab = "Importance")
+```
+
+
+## Summary of the model
+
+From @fig-CV, random forest models using the recursive Boruta algorithm for selecting variables achieve 
+MAE of `r round(mean(M3$MAE), 1)` percentage points, 
+RMSE of `r round(mean(M3$RMSE), 1)` percentage points, and
+$R^2$ of `r round(100*mean(M3$R2), 1)`% on out-of-sample data (data left out when constructing the model for its validation).
+
+```{r}
+tmp <- base::sort(list.files(pattern = "RF_rfCaret_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+rfCaret <- readRDS(tmp[1])
+rf2 <- rfCaret$finalModel
+i_rf2 <- as.integer(rownames(rfCaret$bestTune))
+DATAnoNA <- DATAnoNA %>% 
+    mutate(Fitted = predict(rf2, data = DATAnoNA)$predictions)
+e <- with(DATAnoNA, Yield - Fitted)
+obsmean <- with(DATAnoNA, mean(Yield))
+rf2_MAE <- mean(abs(e))
+rf2_RMSE <- sqrt(mean((e)^2))
+rf2_R2 <- 1 - sum(e^2) / sum((DATAnoNA$Yield - obsmean)^2)
+```
+
+With the selected variables, and a refined dataset with all the `r length(predictors)` selected predictors present ($n =$ `r nrow(DATAnoNA)`, which may differ from the summary reported in @tbl-summ), we further improved the model by tuning its hyperparameters.
+The resulting model was selected based on the highest $R^2$ in 10-fold cross-validation and used *mtry* of `r rfCaret$bestTune$mtry` randomly selected predictors at each split of a tree to separate the data into bins as small as $nodesize =$ `r rfCaret$bestTune$min.node.size` observations. 
+
+The *cross-validation* $R^2$ of this tuned model was `r round(100*rfCaret$results$Rsquared[i_rf2], 1)`%, MAE of `r round(rfCaret$results$MAE[i_rf2], 1)` percentage points and RMSE of `r round(rfCaret$results$RMSE[i_rf2], 1)` percentage points.
+The average predicted yield from this model (`r round(mean(DATAnoNA$Fitted), 1)`%) was close to the average observed yield (`r round(mean(DATAnoNA$Yield), 1)`%) in the dataset (@fig-rf2fit).
+
+The *in-sample* $R^2$ of the tuned model was `r round(100*rf2_R2, 1)`%, MAE of `r round(rf2_MAE, 1)` percentage points and RMSE of `r round(rf2_RMSE, 1)` percentage points.
+I.e., the model explained `r round(100*rf2_R2, 1)`% of the hatchery yield variability in the sample.
+
+```{r}
+#| label: fig-rf2fit
+#| fig-cap: "Observed and predicted yields by the tuned random forest model. The solid black line denotes 1:1 match or ideal forecast."
+
+ggplot(DATAnoNA, aes(x = Yield, y = Fitted)) + 
+    geom_abline(intercept = 0, slope = 1, lwd = 1.1) +
+    geom_point(color = "burlywood") +
+    # geom_smooth(method = "lm", se = FALSE, lty = 2) + 
+    xlab("Observed yield (%)") + ylab("Predicted yield (%)")
+    
+```
+
+
+## Shapley
+
+### Global
+
+```{r}
+# Refit RF with all predictors and estimate the baseline as the average of all predictions
+tmp <- base::sort(list.files(pattern = "RF_baseline_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+baseline <- readRDS(tmp[1])
+tmp <- base::sort(list.files(pattern = "shap_rfall_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+shap_rfall <- readRDS(tmp[1])
+tmp <- base::sort(list.files(pattern = "shap_rfcrashes_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+shap_rfcrashes <- readRDS(tmp[1])
+tmp <- base::sort(list.files(pattern = "shap_rfhigh_",
+                             path = "./dataderived",
+                             full.names = TRUE),
+                  decreasing = TRUE)
+shap_rfhigh <- readRDS(tmp[1])
+```
+
+Using Shapley values, we provide model insights.
+@fig-ShapGlobal compares average magnitudes of the effects by each variable, showing the week number, winter NDVI, winter salinity, Fecundity, and recent ambient salinity and turbidity being among the top determinants of hatchery yields.
+
+```{r}
+#| label: fig-ShapGlobal
+#| fig-cap: "Shapley-based feature importance scores for the whole dataset (higher values correspond to more important variables). The horizontal axis shows average absolute impact of each predictor on the model output (hatchery yield, %). Only the most important predictors are shown."
+
+shv.global <- shapviz(shap_rfall)
+sv_importance(shv.global, max_display = 15)
+```
+
+@fig-ShapPDP further reveals global patterns and individual variability of the effects by the top variables.
+It shows that higher yields are typically observed for broods started before week 30 (end of July), after a winter with high water salinity and low NDVI, with smaller fecundity at spawning, ambient salinity above 10, and low ambient turbidity.
+Note that some of the effects are more neutral than other.
+For example, starting the production during weeks 10--15 does not necessarily lead to a big improvement because Shapley values for those weeks are around 1, but starting late in the year such as week 40 may lead to yields 4--6 percentage points lower than the baseline.
+Similarly, turbidity above 2 generally corresponds to lower yields, but turbidity below 2 corresponds to yield improvements as high as 3 percentage points.
+See @fig-ShapPDPall for partial dependence plots for all the variables.
+
+```{r}
+#| label: fig-ShapPDP
+#| fig-cap: "Shapley-based partial dependence plots for the most important variables. The plots show how a variable's value (horizontal axis) impacts the predicted yield (vertical axis) of every sample (each dot) in the dataset."
+
+nselect = 6
+# Select nselect most important features
+shap_importance <- apply(abs(shv.global$S), 2, mean)
+vselect <- names(sort(shap_importance, decreasing = TRUE))[1:nselect]
+
+ps <- lapply(vselect, function(x) 
+  sv_dependence(shv.global, v = x, color_var = NULL))
+# Note that interactions = FALSE (default) because interactions are 
+# are not available for RF models. Anyways, color_var and heuristics can be used.
+# "A heuristic approach is used to select the strongest interacting feature shown with color in each plot."
+patchwork::wrap_plots(ps, ncol = 3)
+```
+
+
+### Crashes
+
+We further investigated model insights for the cases of hatchery crashes.
+We selected `r length(shap_rfcrashes$iwp)` well-defined crashes (cases with yields below 1% and absolute errors of the model below 3 percentage points).
+For these cases, @fig-ShapCrashes shows week and winter NDVI are still the two most important variables, but the next five important variables relate to water salinity, such as the ambient winter salinity and salinity before filling up the tank, and conditioning salinity.
+Note that the Shapley values are additive such that their sum matches the model output.
+This property is demonstrated in @fig-ShapCrashEx that explains how the model created each of the predicted values $f(x)$ given that the baseline average predicted yield was `r round(baseline, 1)`%.
+
+```{r}
+#| label: fig-ShapCrashes
+#| fig-cap: "Shapley-based feature importance scores for accurately predicted crashes (higher values correspond to more important variables). Only the most important predictors are shown."
+
+shv <- shapviz(shap_rfcrashes$shap)
+sv_importance(shv, max_display = 15)
+```
+
+
+```{r}
+#| label: fig-ShapCrashEx
+#| fig-cap: "Contributions of predictors to several of the well-predicted crashes. The value $E[f(x)]$ is the average predicted value for all cases in the dataset (the baseline), while $f(x)$ is the predicted value for the given case. The rows show the largest impacts of actual predictors (features) for each case and aggregated impact of less influential predictors."
+
+# Select several cases
+set.seed(1)
+tmp <- sample(shap_rfcrashes$iwp, nselect)
+tmp <- DATAnoNA[tmp, predictors]
+# Plot
+ps <- lapply(1:nselect, function(x) {
+  set.seed(123)
+  ex1 <- tmp[x, predictors]
+  shap_ex1 <- fastshap::explain(rf2,
+                                X = DATAnoNA[, predictors],
+                                pred_wrapper = pfun,
+                                newdata = ex1,
+                                nsim = 100, 
+                                adjust = TRUE,
+                                shap_only = FALSE)
+  shv <- shapviz(shap_ex1, X = ex1, baseline = baseline)
+  sv_waterfall(shv)
+})
+patchwork::wrap_plots(ps, ncol = 3)
+```
+
+
+### Highest yields
+
+```{r}
+# Select corresponding data
+Dhigh <- DATAnoNA[shap_rfhigh$iwp, ]
+```
+
+Similar to the previous section, we selected cases of well-defined high yields, with yields above 20% and absolute error of the model below 3 percentage points (`r length(shap_rfhigh$iwp)` cases).
+For these cases, the rankings of influential variables (@fig-ShapHigh) appear to be considerably perturbed compared to the rankings in @fig-ShapGlobal and @fig-ShapCrashes.
+Thus, @fig-ShapHigh shows several turbidity indicators as more important, along with fecundity, NDVI, and pH.
+This might be related to the fact that these cases of high yields already correspond to the favorable season with weeks from `r min(Dhigh$Week)` to `r max(Dhigh$Week)` (average `r round(mean(Dhigh$Week))`) and lower winter NDVI from `r round(min(Dhigh$Winter_NDVI), 2)` to `r round(max(Dhigh$Winter_NDVI), 2)` (average `r round(mean(Dhigh$Winter_NDVI), 2)`).
+@fig-ShapPDP shows that the Shapley effects at these intervals of predictors are positive but not exceptionally high.
+@fig-ShapHighEx gives several example explanations of how the model came up with the accurate predictions of high yields.
+
+```{r}
+#| label: fig-ShapHigh
+#| fig-cap: "Shapley-based feature importance scores for accurately predicted high yields (higher values correspond to more important variables). Only the most important predictors are shown."
+
+shv <- shapviz(shap_rfhigh$shap)
+sv_importance(shv, max_display = 15)
+```
+
+```{r}
+#| label: fig-ShapHighEx
+#| fig-cap: "Contributions of predictors to several of the well-predicted high yields. The value $E[f(x)]$ is the average predicted value for all cases in the dataset (the baseline), while $f(x)$ is the predicted value for the given case. The rows show the largest impacts of actual predictors (features) for each case and aggregated impact of less influential predictors."
+
+# Select several cases
+set.seed(1)
+tmp <- sample(shap_rfhigh$iwp, nselect)
+tmp <- DATAnoNA[tmp, predictors]
+# Plot
+ps <- lapply(1:nselect, function(x) {
+  set.seed(123)
+  ex1 <- tmp[x, predictors]
+  shap_ex1 <- fastshap::explain(rf2,
+                                X = DATAnoNA[, predictors],
+                                pred_wrapper = pfun,
+                                newdata = ex1,
+                                nsim = 100, 
+                                adjust = TRUE,
+                                shap_only = FALSE)
+  shv <- shapviz(shap_ex1, X = ex1, baseline = baseline)
+  sv_waterfall(shv)
+})
+patchwork::wrap_plots(ps, ncol = 3)
+```
+
+
+# Conclusion
+
+This analysis demonstrated one of the possible pathways of using observational data to study the effects of factors for improving oyster hatchery production.
+By applying machine learning to the data, we were able to process a large number of predictors, build and evaluate a variety of models, and extract data patterns that helped the model to achieve accurate predictions of yields.
+From these patterns, we can identify which conditions lead to lower yields and which hatchery should try to avoid (e.g., starting production late in the season or at low salinity) as well as conditions corresponding to improved yields (e.g., low fecundity and turbidity).
+
+
+```{r}
+# Create a bib database for R packages
+knitr::write_bib(c(.packages()
+                   ,'base'
+                   ,'daymetr', 'missForest'
+                   ,'ranger', 'Boruta', 'diversityForest', 'caret'
+), 'refpackages.bib')
+```
+
+
+# Acknowledgements {.unnumbered}
+
+This research was supported by an award from the Chesapeake Bay Trust and Chesapeake Oyster Alliance.
+
+::: {layout="[30,-5,40]" layout-valign="center"}
+![](logo_CBTRUST.jpg){width=30%}
+
+![](logo_COA.png){width=40%}
+:::
+
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+
+# Appendix
+
+## Pairwise comparisons of the cross-validation results {#sec-CVpairs}
+
+Group averages of MAE:
+```{r}
+tapply(MCV$MAE, MCV$Version, mean)
+```
+
+Group averages of RMSE:
+```{r}
+tapply(MCV$RMSE, MCV$Version, mean)
+```
+
+Group averages of $R^2$:
+```{r}
+tapply(MCV$R2, MCV$Version, mean)
+```
+
+Group averages of number of variables selected:
+```{r}
+tapply(MCV$p, MCV$Version, mean)
+```
+
+Pairwise comparisons:
+```{r}
+attach(MCV)
+pairwise.t.test(MAE, Version,
+                paired = TRUE,
+                p.adjust.method = am)
+pairwise.t.test(RMSE, Version,
+                paired = TRUE,
+                p.adjust.method = am)
+pairwise.t.test(R2, Version,
+                paired = TRUE,
+                p.adjust.method = am)
+detach(MCV)
+```
+
+
+## Partial plots
+
+```{r}
+#| label: fig-ShapPDPall
+#| fig-cap: "Shapley-based partial dependence plots for all variables. The plots show how a variable's value (horizontal axis) impacts the predicted yield (vertical axis) of every sample (each dot) in the dataset. The variables are listed in the decreasing order of their global Shapley importance (most important first)."
+#| fig-height: 21
+
+# nselect = 6
+# Select nselect most important features
+# shap_importance <- apply(abs(shv.global$S), 2, mean)
+vselect <- names(sort(shap_importance, decreasing = TRUE))#[1:nselect]
+
+ps <- lapply(vselect, function(x) 
+  sv_dependence(shv.global, v = x, color_var = NULL))
+# Note that interactions = FALSE (default) because interactions are 
+# are not available for RF models. Anyways, color_var and heuristics can be used.
+# "A heuristic approach is used to select the strongest interacting feature shown with color in each plot."
+patchwork::wrap_plots(ps, ncol = 4)
+```
