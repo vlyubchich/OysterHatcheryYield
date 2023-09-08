@@ -19,8 +19,8 @@ execute:
   
 bibliography: 
   - refpackages.bib
-  - "G:/My Drive/ResearchProjects/refsGeneral.bib"
-csl: "G:/My Drive/ResearchProjects/springer-basicVL.csl"
+  - refsOyster.bib
+csl: springer-basicVL.csl
 
 format:
   html:
