@@ -8,7 +8,7 @@ citation:
   type: report
   publisher: "University of Maryland Center for Environmental Science"
   publisher-place: "Cambridge, Maryland, USA"
-  url: https://vlyubchich.github.io/hatchery_rf
+  url: https://vlyubchich.github.io/OysterHatcheryYield
 date: today
 date-format: iso
 fig-cap-location: top
