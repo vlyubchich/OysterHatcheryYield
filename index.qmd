@@ -9,6 +9,7 @@ citation:
   publisher: "University of Maryland Center for Environmental Science"
   publisher-place: "Cambridge, Maryland, USA"
   url: https://vlyubchich.github.io/OysterHatcheryYield
+  doi: https://doi.org/10.5281/zenodo.8327628
 date: today
 date-format: iso
 fig-cap-location: top
