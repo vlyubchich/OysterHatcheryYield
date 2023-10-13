@@ -878,7 +878,8 @@ knitr::write_bib(c(.packages()
 
 # Acknowledgements {.unnumbered}
 
-This research was supported by an award from the Chesapeake Bay Trust and Chesapeake Oyster Alliance.
+We thank Charles Pellerin (ERT contractor working at NOAA) for providing the buoy data.
+This research was supported by awards from the Chesapeake Bay Trust and Chesapeake Oyster Alliance, and Harry R. Hughes Center for Agro-Ecology.
 
 ::: {layout="[30,-5,40]" layout-valign="center"}
 ![](logo_CBTRUST.jpg){width=30%}
